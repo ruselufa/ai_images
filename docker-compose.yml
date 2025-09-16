@@ -1,0 +1,152 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai_tg_writer_postgres
+    environment:
+      - POSTGRES_DB=ai_tg_writer
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    networks:
+      - ai_tg_writer_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai_tg_writer_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - ai_tg_writer_network
+
+  # Prometheus для метрик
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ai_tg_writer_prometheus
+    ports:
+      - "0.0.0.0:9090:9090"  # Доступ с любого IP
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - ai_tg_writer_network
+
+  # Grafana для дашбордов
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ai_tg_writer_grafana
+    ports:
+      - "0.0.0.0:3000:3000"  # Доступ с любого IP
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_SERVER_DOMAIN=aiwhisper.ru
+      - GF_SERVER_ROOT_URL=https://aiwhisper.ru:3443/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=false
+      - GF_SERVER_ENABLE_GZIP=true
+      - GF_SECURITY_COOKIE_SECURE=true
+      - GF_SECURITY_COOKIE_SAMESITE=strict
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./monitoring/grafana/conf/grafana.ini:/etc/grafana/grafana.ini
+    restart: unless-stopped
+    networks:
+      - ai_tg_writer_network
+
+  # Jaeger для трейсинга
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: ai_tg_writer_jaeger
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+    networks:
+      - ai_tg_writer_network
+
+  # Node Exporter для системных метрик
+  node_exporter:
+    image: prom/node-exporter:latest
+    container_name: ai_tg_writer_node_exporter
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
+    networks:
+      - ai_tg_writer_network
+
+  # PostgreSQL Exporter для метрик базы данных
+  postgres_exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: ai_tg_writer_postgres_exporter
+    ports:
+      - "9187:9187"
+    environment:
+      - DATA_SOURCE_NAME=postgresql://postgres:${DB_PASSWORD}@postgres:5432/ai_tg_writer?sslmode=disable
+    restart: unless-stopped
+    networks:
+      - ai_tg_writer_network
+    depends_on:
+      - postgres
+
+  # Go приложение
+  app:
+    build: .
+    container_name: ai_tg_writer_app
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=postgres
+      - REDIS_HOST=redis
+    volumes:
+      - ./audio:/root/audio
+    networks:
+      - ai_tg_writer_network
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  ai_tg_writer_network:
+    driver: bridge
